@@ -4,6 +4,8 @@
 
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen) ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2) ![CI](https://github.com/iagomoreir/pg-airlock/actions/workflows/ci.yml/badge.svg)
 
+![pg-airlock demo: the agent forgets a WHERE clause, you roll it back](docs/demo.gif)
+
 An MCP server that sits between an agent and a Postgres/Supabase database. The agent reads freely, but every write is executed inside a transaction that is **held open**. You see what the statement *actually did*, row by row, and then commit or roll back. The agent has no tool that can commit.
 
 ```
