@@ -1,0 +1,72 @@
+--- 1. The agent means to upgrade ONE customer, but forgets the WHERE clause ---
+
+agent> db_execute  UPDATE customers SET plan = 'pro'
+  status: pending
+  risk: high
+  message: NOT applied yet.
+
+you $ pg-airlock pending
+  chg_4c0490e8a0  [PENDING]  risk: HIGH  rows affected: 4 (2 matched but already had these values)
+  created 2026-10-16T17:01:39.997Z, auto-rollback at 2026-10-16T17:11:39.997Z
+  
+  SQL:
+    UPDATE customers SET plan = 'pro'
+  
+  Changes:
+    customers: 0 inserted, 2 updated, 0 deleted  [rows 4 -> 4]
+      ~ id=2  plan: "free" -> "pro"
+      ~ id=4  plan: "free" -> "pro"
+
+you $ pg-airlock rollback chg_4c0490e8a0 --reason "missing WHERE"
+  Rolled back chg_4c0490e8a0. The database is unchanged.
+
+agent> db_status  chg_4c0490e8a0
+  status: rolled_back
+  message: NOT APPLIED: this change was rolled back (the human rejected it). The database does not contain it. Discard any assumptions or earlier reads that depended on it, re-read the current state, and adjust your plan before continuing.
+
+--- 2. The agent corrects itself ---
+
+agent> db_execute  UPDATE customers SET plan = 'pro' WHERE name = 'Bruno'
+  status: pending
+  risk: low
+
+you $ pg-airlock commit chg_1011a80806 --yes
+  chg_1011a80806  [PENDING]  risk: LOW  rows affected: 1
+  created 2026-10-16T17:01:40.590Z, auto-rollback at 2026-10-16T17:11:40.590Z
+  
+  SQL:
+    UPDATE customers SET plan = 'pro' WHERE name = 'Bruno'
+  
+  Changes:
+    customers: 0 inserted, 1 updated, 0 deleted  [rows 4 -> 4]
+      ~ id=2  plan: "free" -> "pro"
+  
+  Committed chg_1011a80806.
+
+agent> db_status  chg_1011a80806
+  status: committed
+  message: APPLIED. The human approved this change; it is now permanent.
+
+--- 3. The agent tries to approve its own change ---
+
+agent> db_execute  DELETE FROM customers WHERE plan = 'free'
+  status: pending
+agent> db_execute  COMMIT
+  error: blocked: 'COMMIT' is not allowed through this proxy (transaction control, COPY, DO/CALL, SET and similar are reserved)
+agent> db_status  chg_181a002eb2
+  status: pending
+
+you $ pg-airlock rollback chg_181a002eb2
+  Rolled back chg_181a002eb2. The database is unchanged.
+
+--- Audit journal ---
+
+you $ pg-airlock log -n 20
+  2026-10-16T17:01:39.999Z  proposed           chg_4c0490e8a0  agent  UPDATE customers SET plan = 'pro'
+  2026-10-16T17:01:40.563Z  rolled_back        chg_4c0490e8a0  human-cli  UPDATE customers SET plan = 'pro'
+  2026-10-16T17:01:40.590Z  proposed           chg_1011a80806  agent  UPDATE customers SET plan = 'pro' WHERE name = 'Bruno'
+  2026-10-16T17:01:40.944Z  committed          chg_1011a80806  human-cli  UPDATE customers SET plan = 'pro' WHERE name = 'Bruno'
+  2026-10-16T17:01:40.960Z  proposed           chg_181a002eb2  agent  DELETE FROM customers WHERE plan = 'free'
+  2026-10-16T17:01:40.978Z  rejected_statement -    COMMIT
+  2026-10-16T17:01:41.227Z  rolled_back        chg_181a002eb2  human-cli  DELETE FROM customers WHERE plan = 'free'
+

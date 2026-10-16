@@ -1,0 +1,55 @@
+{
+  "name": "pg-airlock",
+  "version": "0.1.0",
+  "description": "Let AI agents write to your Postgres. You approve the exact diff. An MCP server that holds every agent write in an open transaction until a human commits or rolls it back.",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "tsc && tsx --test test/*.test.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "demo": "tsc && tsx examples/demo.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "postgres",
+    "supabase",
+    "ai-agents",
+    "guardrails",
+    "human-in-the-loop",
+    "rollback",
+    "claude-code",
+    "database-safety"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "pg-airlock": "dist/cli.js"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.10",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
+}
