@@ -114,3 +114,26 @@ test('a read made while a change is pending sees that change, and the change sur
   await engine.commit(p.id);
   assert.equal((await engine.read('SELECT plan FROM users WHERE id = 1')).rows[0]?.['plan'], 'pro');
 });
+
+test('triggers and cascading foreign keys that can touch tables outside the diff are flagged', async () => {
+  await driver.exec(`
+    CREATE TABLE audit (id serial PRIMARY KEY, body text);
+    CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit(body) VALUES ('via trigger'); RETURN NEW; END $$;
+    CREATE TRIGGER t AFTER UPDATE ON users FOR EACH ROW EXECUTE FUNCTION trg();
+    CREATE TABLE orders (id int PRIMARY KEY, user_id int REFERENCES users(id) ON DELETE CASCADE);
+  `);
+  const p = await engine.propose("UPDATE users SET plan = 'pro' WHERE id = 1");
+  assert.ok(p.warnings.some((w) => /has triggers/.test(w)), p.warnings.join('|'));
+  assert.ok(p.warnings.some((w) => /cascading foreign keys/.test(w)));
+  assert.notEqual(p.risk, 'low');
+  assert.deepEqual(p.diff.map((d) => d.table), ['users']);
+  await engine.rollback(p.id);
+});
+
+test('a wrapper function around pg_notify queues nothing that survives a read', async () => {
+  // The notification is queued inside the read's savepoint and discarded with it (verified on Postgres 16).
+  await driver.exec(`CREATE FUNCTION wrap() RETURNS int LANGUAGE sql AS $$ SELECT 1 FROM (SELECT pg_notify('c','x')) s $$;`);
+  const p = await engine.propose("UPDATE users SET plan = 'pro' WHERE id = 1");
+  await engine.read('SELECT wrap()');
+  await engine.commit(p.id);
+});

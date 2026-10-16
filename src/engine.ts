@@ -167,6 +167,8 @@ export class Engine {
         if (cls.tables.length === 0) {
           warnings.push('Could not determine which tables this statement touches: no row-level diff is available.');
         }
+        const hidden = kind === 'write' ? await this.hiddenEffects(cls.tables) : [];
+        for (const h of hidden) warnings.push(h);
         if (kind === 'ddl' && cls.tables.length > 0) {
           warnings.push('Schema changes (columns, indexes, constraints) are not shown in the row diff; read the SQL itself.');
         }
@@ -190,7 +192,7 @@ export class Engine {
           diff,
           risk: unresolved
             ? 'high'
-            : this.assessRisk(cls.destructive, kind, cls.tables.length, res.rowCount, diff),
+            : this.raiseForHidden(this.assessRisk(cls.destructive, kind, cls.tables.length, res.rowCount, diff), hidden.length > 0),
           warnings,
         };
 
@@ -217,6 +219,36 @@ export class Engine {
         throw new AirlockError('sql_error', message);
       }
     });
+  }
+
+  /** Triggers and cascading foreign keys can change tables the statement never names, so the diff cannot show them. */
+  private async hiddenEffects(tables: string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const t of tables) {
+      try {
+        const trg = await this.driver.query(
+          `SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = to_regclass($1) AND NOT tgisinternal`,
+          [t],
+        );
+        if (Number(trg.rows[0]?.['n'] ?? 0) > 0) {
+          out.push(`Table ${t} has triggers: they ran as part of this change and may have modified other tables that are not in the diff above.`);
+        }
+        const fk = await this.driver.query(
+          `SELECT count(*)::int AS n FROM pg_constraint WHERE contype = 'f' AND confrelid = to_regclass($1) AND (confdeltype IN ('c','n','d') OR confupdtype IN ('c','n','d'))`,
+          [t],
+        );
+        if (Number(fk.rows[0]?.['n'] ?? 0) > 0) {
+          out.push(`Other tables reference ${t} with cascading foreign keys: rows in those tables may have changed too and are not in the diff above.`);
+        }
+      } catch {
+        /* catalog lookup is best effort */
+      }
+    }
+    return out;
+  }
+
+  private raiseForHidden(risk: Proposal['risk'], hidden: boolean): Proposal['risk'] {
+    return hidden && risk === 'low' ? 'medium' : risk;
   }
 
   private assessRisk(
