@@ -18,6 +18,10 @@ export interface EngineOptions {
   maxSnapshotRows?: number;
   /** Max rows returned to the agent from a single read. */
   maxReadRows?: number;
+  /** statement_timeout for agent reads. A runaway read would otherwise block approvals. */
+  readTimeoutMs?: number;
+  /** statement_timeout for the proposed write and the diff snapshots. */
+  writeTimeoutMs?: number;
   journal?: Journal;
 }
 
@@ -42,6 +46,8 @@ export class Engine {
   private readonly ttlMs: number;
   private readonly maxSnapshotRows: number;
   private readonly maxReadRows: number;
+  private readonly readTimeoutMs: number;
+  private readonly writeTimeoutMs: number;
   private readonly journal: Journal;
 
   constructor(
@@ -51,6 +57,8 @@ export class Engine {
     this.ttlMs = options.ttlMs ?? 10 * 60 * 1000;
     this.maxSnapshotRows = options.maxSnapshotRows ?? 5000;
     this.maxReadRows = options.maxReadRows ?? 200;
+    this.readTimeoutMs = Math.max(1, Math.floor(options.readTimeoutMs ?? 10_000));
+    this.writeTimeoutMs = Math.max(1, Math.floor(options.writeTimeoutMs ?? 60_000));
     this.journal = options.journal ?? new Journal(null);
   }
 
@@ -73,20 +81,25 @@ export class Engine {
       const pendingChangeId = this.current?.proposal.id;
       let res;
       if (this.current) {
-        // Run inside the pending transaction (so the agent sees its own change),
-        // guarded by a savepoint so a failing read cannot poison the transaction.
+        // Run inside the pending transaction so the agent sees its own change, but:
+        //  - read-only, so a SELECT cannot call a function that writes into the held transaction
+        //    (it would be committed together with the change the human approved), and
+        //  - ALWAYS rolled back to the savepoint, so even a read that slips through leaves nothing behind.
         await this.driver.query('SAVEPOINT pg_airlock_read');
         try {
+          await this.driver.query('SET LOCAL transaction_read_only = on');
+          await this.driver.query(`SET LOCAL statement_timeout = ${this.readTimeoutMs}`);
           res = await this.driver.query(sql, params);
-          await this.driver.query('RELEASE SAVEPOINT pg_airlock_read');
         } catch (err) {
+          throw new AirlockError('sql_error', (err as Error).message);
+        } finally {
           await this.driver.query('ROLLBACK TO SAVEPOINT pg_airlock_read').catch(() => undefined);
           await this.driver.query('RELEASE SAVEPOINT pg_airlock_read').catch(() => undefined);
-          throw new AirlockError('sql_error', (err as Error).message);
         }
       } else {
         await this.driver.query('BEGIN READ ONLY');
         try {
+          await this.driver.query(`SET LOCAL statement_timeout = ${this.readTimeoutMs}`);
           res = await this.driver.query(sql, params);
         } catch (err) {
           throw new AirlockError('sql_error', (err as Error).message);
@@ -125,6 +138,7 @@ export class Engine {
 
       await this.driver.query('BEGIN');
       try {
+        await this.driver.query(`SET LOCAL statement_timeout = ${this.writeTimeoutMs}`);
         const before = new Map<string, TableSnap>();
         for (const t of cls.tables) before.set(t, await this.snapshot(t));
 
@@ -132,12 +146,17 @@ export class Engine {
 
         const diff: TableDiff[] = [];
         const warnings: string[] = [];
+        let unresolved = false;
         for (const t of cls.tables) {
           const b = before.get(t)!;
           const a = await this.snapshot(t);
           const keyColumns = b.keyColumns.length > 0 ? b.keyColumns : a.keyColumns;
           const d = diffTables(t, keyColumns, b.snapshot, a.snapshot);
           diff.push(d);
+          if (b.qualified === null && a.qualified === null) {
+            unresolved = true;
+            warnings.push(`Could not find table ${t} before or after the statement: no diff is available for it.`);
+          }
           if (!d.rowLevel && (b.snapshot || a.snapshot)) {
             warnings.push(`Table ${t} has more than ${this.maxSnapshotRows} rows: only row counts are shown, not a row-level diff.`);
           }
@@ -169,7 +188,9 @@ export class Engine {
           returning: jsonSafe(res.rows.slice(0, 20)),
           tables: cls.tables,
           diff,
-          risk: this.assessRisk(cls.destructive, kind, cls.tables.length, res.rowCount, diff),
+          risk: unresolved
+            ? 'high'
+            : this.assessRisk(cls.destructive, kind, cls.tables.length, res.rowCount, diff),
           warnings,
         };
 

@@ -27,6 +27,8 @@ serve options:
   --db <spec>          memory | pglite:<dir> | postgres://user:pw@host/db   (or env PG_AIRLOCK_DB)
   --ttl <seconds>      Auto-rollback a pending change after this long (default 600)
   --max-rows <n>       Largest table that gets a row-level diff (default 5000)
+  --read-timeout <s>   statement_timeout for agent reads, in seconds (default 10)
+  --write-timeout <s>  statement_timeout for proposed writes, in seconds (default 60)
   --port <n>           Fixed port for the approval API (default: random free port)
   --init <file.sql>    Run a SQL script once at startup, as the operator (seed data for demos)
 
@@ -39,6 +41,8 @@ const { values, positionals } = parseArgs({
     db: { type: 'string' },
     ttl: { type: 'string' },
     'max-rows': { type: 'string' },
+    'read-timeout': { type: 'string' },
+    'write-timeout': { type: 'string' },
     port: { type: 'string' },
     init: { type: 'string' },
     'state-dir': { type: 'string' },
@@ -68,6 +72,8 @@ async function serve(): Promise<void> {
     journal,
     ...(values.ttl ? { ttlMs: Number(values.ttl) * 1000 } : {}),
     ...(values['max-rows'] ? { maxSnapshotRows: Number(values['max-rows']) } : {}),
+    ...(values['read-timeout'] ? { readTimeoutMs: Number(values['read-timeout']) * 1000 } : {}),
+    ...(values['write-timeout'] ? { writeTimeoutMs: Number(values['write-timeout']) * 1000 } : {}),
   });
   const approval = await startApprovalServer(engine, {
     stateDir,

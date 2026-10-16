@@ -112,3 +112,53 @@ test('expired approval releases locks held by the pending transaction', opts, as
   await observer.query(`UPDATE ${T} SET balance = 2 WHERE owner = 'carla'`);
   assert.equal(await observed(), 'ana:100.50,bruno:70.00,carla:2.00');
 });
+
+test('a runaway read is cancelled by statement_timeout and does not block the human decision', opts, async () => {
+  await engine.close();
+  engine = new Engine(await openDriver(url!), { readTimeoutMs: 400 });
+  const p = await engine.propose(`UPDATE ${T} SET balance = balance + 1 WHERE owner = 'bruno'`);
+
+  const started = Date.now();
+  await assert.rejects(
+    engine.read('WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r'),
+    (e: AirlockError) => e.code === 'sql_error' && /timeout|cancel/i.test(e.message),
+  );
+  assert.ok(Date.now() - started < 8000, 'the read must be cut off quickly');
+
+  // The pending change is intact and the human can still decide.
+  const done = await engine.commit(p.id);
+  assert.equal(done.status, 'committed');
+});
+
+test('a SELECT calling a writing function cannot ride along with a pending change (real Postgres)', opts, async () => {
+  const fn = `au_${tag}_sneaky`;
+  await observer.query(
+    `CREATE FUNCTION ${fn}() RETURNS int LANGUAGE sql VOLATILE AS $$ UPDATE ${T} SET owner = owner || '!' WHERE owner = 'carla' RETURNING 1 $$`,
+  );
+  try {
+    const p = await engine.propose(`UPDATE ${T} SET balance = balance + 1 WHERE owner = 'ana'`);
+    await assert.rejects(engine.read(`SELECT ${fn}()`), (e: AirlockError) => e.code === 'sql_error');
+    await engine.commit(p.id);
+    const owners = (await observer.query(`SELECT owner FROM ${T} ORDER BY id`)).rows.map((r) => r.owner);
+    assert.deepEqual(owners, ['ana', 'bruno', 'carla']);
+  } finally {
+    await observer.query(`DROP FUNCTION IF EXISTS ${fn}()`);
+  }
+});
+
+test('pg_notify is refused, so nothing is delivered at commit that the diff did not show', opts, async () => {
+  const listener = new pg.Client({ connectionString: url });
+  await listener.connect();
+  const received: string[] = [];
+  listener.on('notification', (m) => received.push(m.payload ?? ''));
+  await listener.query('LISTEN au_chan');
+  try {
+    const p = await engine.propose(`UPDATE ${T} SET balance = balance + 1 WHERE owner = 'ana'`);
+    await assert.rejects(engine.read(`SELECT pg_notify('au_chan', 'hello')`), (e: AirlockError) => e.code === 'blocked');
+    await engine.commit(p.id);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(received, []);
+  } finally {
+    await listener.end();
+  }
+});

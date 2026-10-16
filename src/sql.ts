@@ -137,7 +137,13 @@ const TABLE_PATTERNS: RegExp[] = [
   ),
 ];
 
+const ID_ONE = new RegExp(ID, 'g');
 const NAME_ONE = new RegExp(NAME, 'g');
+
+/** "public" . "my table" -> "public"."my table": only separators lose whitespace, never the inside of a quoted name. */
+function canonicalName(raw: string): string {
+  return (raw.match(ID_ONE) ?? []).join('.');
+}
 
 export function extractTables(normalized: string): string[] {
   const seen = new Map<string, string>();
@@ -148,7 +154,7 @@ export function extractTables(normalized: string): string[] {
       const group = m[1] ?? '';
       const names = group.match(NAME_ONE) ?? [];
       for (const raw of names) {
-        const name = raw.replace(/\s+/g, '');
+        const name = canonicalName(raw);
         const key = name.toLowerCase();
         if (!seen.has(key)) seen.set(key, name);
       }
@@ -157,9 +163,13 @@ export function extractTables(normalized: string): string[] {
   return [...seen.values()];
 }
 
-/** Functions that read the server's disk, kill sessions or otherwise escape the data model. */
+/**
+ * Functions that touch the server's disk, sessions, locks or other processes, or whose effects
+ * only materialize at commit (pg_notify) and would therefore not appear in the diff.
+ * Case-insensitive; denied in every statement kind.
+ */
 const DENIED_FUNCTIONS =
-  /\b(pg_terminate_backend|pg_cancel_backend|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_ls_\w+|pg_stat_file|lo_import|lo_export|lo_from_bytea|dblink\w*|set_config|pg_reload_conf|pg_rotate_logfile|pg_switch_wal|pg_advisory_(?:xact_)?lock\w*)\b/i;
+  /\b(pg_terminate_backend|pg_cancel_backend|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_ls_\w+|pg_stat_file|lo_import|lo_export|lo_from_bytea|dblink\w*|set_config|pg_reload_conf|pg_rotate_logfile|pg_switch_wal|pg_notify|pg_sleep\w*|pg_(?:try_)?advisory_\w+|pg_logical_emit_message|pg_(?:create|drop|advance|copy)_\w*(?:slot|origin)\w*|pg_replication_origin_\w+)\b/i;
 
 const READ_VERBS = new Set(['select', 'values', 'table', 'show']);
 const WRITE_VERBS = new Set(['insert', 'update', 'delete', 'merge']);
@@ -196,7 +206,8 @@ export function classify(sql: string): Classification {
   }
 
   if (verb === 'explain') {
-    if (/\banalyze\b/i.test(body)) {
+    // PostgreSQL accepts both spellings, and the option form EXPLAIN (ANALYSE ...).
+    if (/\banaly[sz]e\b/i.test(body)) {
       return blocked('EXPLAIN ANALYZE executes the statement; send the statement itself', verb);
     }
     return { kind: 'read', verb, tables: [], hasWhere, destructive: false };

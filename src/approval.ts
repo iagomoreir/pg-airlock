@@ -26,8 +26,8 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-function tokenOk(provided: string | undefined, expected: string): boolean {
-  if (!provided) return false;
+function tokenOk(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string' || provided.length === 0) return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);

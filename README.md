@@ -2,7 +2,7 @@
 
 **Let AI agents write to your Postgres. You approve the exact diff.**
 
-![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen) ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2)
+![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen) ![MCP server](https://img.shields.io/badge/MCP-server-8A2BE2) ![CI](https://github.com/iagomoreir/pg-airlock/actions/workflows/ci.yml/badge.svg)
 
 An MCP server that sits between an agent and a Postgres/Supabase database. The agent reads freely, but every write is executed inside a transaction that is **held open**. You see what the statement *actually did*, row by row, and then commit or roll back. The agent has no tool that can commit.
 
@@ -55,7 +55,7 @@ The full run (the corrected retry, an agent trying to `COMMIT` its own change, t
 - **You review the real result, not a guess.** The statement really runs, so triggers, defaults, `RETURNING` and constraints are all reflected in the diff.
 - **Rollback is exact and free.** It is a Postgres `ROLLBACK`. Postgres DDL is transactional, so even `DROP TABLE` can be previewed and undone.
 - **The agent is told the truth.** A rejected change returns `NOT APPLIED ... discard any assumptions`, so it stops reasoning from a state that never became real.
-- **No agent-side commit path.** The agent sees four tools: `db_schema`, `db_query`, `db_execute`, `db_status`. `COMMIT`, `ROLLBACK`, `BEGIN`, `SET`, `COPY`, `DO`/`CALL`, multi-statement strings and a deny-list of dangerous functions are rejected.
+- **No agent-side commit path.** The agent sees four tools: `db_schema`, `db_query`, `db_execute`, `db_status`. `COMMIT`, `ROLLBACK`, `BEGIN`, `SET`, `COPY`, `DO`/`CALL`, multi-statement strings, `EXPLAIN ANALYZE` (both spellings) and a deny-list of dangerous functions (file access, `pg_notify`, advisory locks, `pg_sleep`, `set_config`, ...) are rejected. Reads have a statement timeout (10 s by default) so a runaway query cannot block your approval.
 - **Audit journal.** Every proposal and every human decision lands in `journal.jsonl`.
 
 ## Quick start
@@ -121,8 +121,8 @@ These projects solve adjacent problems. Use them together if you need more than 
 3. **Database effects only.** Sequences (`nextval`), NOTIFY, triggers that call external services, `dblink`/FDW writes and anything outside the transaction are not undone. One pending change at a time.
 4. **Classifier, not a parser.** `src/sql.ts` is conservative and tested against comment/literal/dollar-quote tricks, but it is not a full SQL parser. Reads additionally run in `BEGIN READ ONLY`, so Postgres is the second line of defence.
 5. **Diffs read whole tables.** Row-level diffs snapshot each touched table (before and after) inside the transaction, so tables above `--max-rows` (default 5000) fall back to counts only. A production version should diff via `RETURNING`/triggers instead.
-6. **Reads while pending see the pending change** (flagged with `pendingChangeId`).
-7. **Not yet tested on Supabase specifically**, only on embedded Postgres (PGlite) and Postgres 16.
+6. **Reads while pending see the pending change** (flagged with `pendingChangeId`). They run read-only inside the held transaction and are always rolled back to a savepoint, so a `SELECT` that calls a writing function cannot ride along with the change you approve.
+7. **Embedded mode is for demos and tests.** PGlite accepts `statement_timeout` but does not enforce it, so a runaway read is only cut off on a real Postgres (covered by the real-Postgres test suite). Row-level security, roles and extensions behave as on the real server only when you connect to one.
 
 ## Development
 
